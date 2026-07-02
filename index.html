@@ -479,15 +479,22 @@ function buildPlanets(lib){
   });
 }
 
-// AUTO SET GENERATION
-// Strategy: alternate between "smooth" moves and "bold harmonic jumps"
-// to create a journey through the key space — avoids monotonous key clusters.
+// ─── AUTO SET: 2-PHASE KEY JOURNEY ──────────────────────────────────────────
 //
-// Move types by flow:
-//   build → start quiet (±2,±3 bold), crescendo to tight (±1,±0)
-//   peak  → mix of smooth (±1) and lifts (±3) for sustained energy
-//   down  → start punchy (±1), loosen into drifts (±3,±4)
-//   wave  → alternating smooth/bold every 2-3 tracks
+// Phase 1 — Plan the KEY sequence first (not track-by-track greedy)
+//   → Ensures wide harmonic variety across the full set
+//   → Each step uses a move type (smooth/lift/bold) based on flow + position
+//   → Same key number is blocked for 3 steps after being used
+//
+// Phase 2 — Fill tracks to match each planned key
+//   → Best BPM-matching track at target key
+//   → Falls back to compatible key if no track available
+//
+// Move types:
+//   smooth  score 7-10  → ±1 same mode, parallel (safe, seamless)
+//   lift    score 3-6   → ±2, ±3 minor third (melodic techno characteristic)
+//   bold    score 1-4   → ±4 major third, ±5 dominant (dramatic jump)
+
 function generateSet(){
   const len=parseInt(document.getElementById('set-length').value);
   const startKey=document.getElementById('start-key').value;
@@ -495,7 +502,9 @@ function generateSet(){
   const pool=tracks.filter(t=>t.visible);
   if(!pool.length) return;
 
-  // BPM target per position
+  const availKeys=[...new Set(pool.map(t=>t.camelot))];
+
+  // BPM curve per flow
   const flowBpm=(i,n)=>({
     build: 112+(i/n)*22,
     peak:  122+Math.sin(i/n*Math.PI)*6,
@@ -503,75 +512,108 @@ function generateSet(){
     wave:  124+Math.sin(i/n*Math.PI*2)*8
   }[flow]);
 
-  // Minimum key score allowed at each position (varies by flow)
-  // Higher = stricter (safer), lower = bolder (more varied)
-  function minScoreAt(i, n) {
-    const t = i / n;
-    if(flow==='build') return t < 0.4 ? 2 : t < 0.75 ? 4 : 6;  // start loose → tighten
-    if(flow==='peak')  return (i%3===2) ? 3 : 5;                // every 3rd track: bold lift
-    if(flow==='down')  return t < 0.3 ? 6 : t < 0.7 ? 4 : 2;  // loosen as set winds down
-    if(flow==='wave')  return (i%2===0) ? 5 : 3;               // alternate smooth/bold
-    return 4;
+  // Move pattern: score range [min, max] allowed at each step index
+  // build: loose start → tight end (emotional build-up)
+  // peak:  smooth baseline with periodic lifts
+  // down:  tight start → loose drift
+  // wave:  smooth/lift/bold alternating
+  function moveRange(i, n) {
+    const t=i/n;
+    if(flow==='build'){
+      if(t<0.35) return [3,7];   // bold early moves
+      if(t<0.7)  return [5,9];   // settling into groove
+      return [7,10];             // tight at peak
+    }
+    if(flow==='peak'){
+      // pattern: smooth, smooth, lift, smooth, lift, bold, smooth...
+      const pat=['smooth','smooth','lift','smooth','lift','bold','smooth'];
+      const type=pat[i%pat.length];
+      return type==='smooth'?[7,10]:type==='lift'?[3,7]:[1,5];
+    }
+    if(flow==='down'){
+      if(t<0.3) return [7,10];
+      if(t<0.65) return [4,8];
+      return [2,6];              // drift wide at the end
+    }
+    if(flow==='wave'){
+      // alternates: smooth → lift → smooth → bold → smooth → lift...
+      const pat=['smooth','lift','smooth','bold','smooth','lift'];
+      const type=pat[i%pat.length];
+      return type==='smooth'?[7,10]:type==='lift'?[3,7]:[1,5];
+    }
+    return [4,9];
   }
 
-  // Pick start track
-  let start=null;
-  if(startKey!=='auto') start=pool.find(t=>t.camelot===startKey);
-  if(!start){
-    // Pick track with most harmonic connections in the pool
-    const counts=pool.map(t=>({t,c:pool.filter(o=>compatScore(t.camelot,o.camelot)>=4).length}));
-    counts.sort((a,b)=>b.c-a.c);
-    start=counts[0].t;
+  // ── PHASE 1: Plan key journey ──────────────────────────────────────────────
+  let currentKey;
+  if(startKey!=='auto'&&availKeys.includes(startKey)) {
+    currentKey=startKey;
+  } else {
+    // Pick key with most tracks as start
+    const cnt={};
+    pool.forEach(t=>cnt[t.camelot]=(cnt[t.camelot]||0)+1);
+    currentKey=availKeys.slice().sort((a,b)=>(cnt[b]||0)-(cnt[a]||0))[0];
   }
 
-  const result=[start], used=new Set([start.id]);
-  // Track which key "zones" (clusters of 3 numbers) we've visited
-  const visitedZones=new Set([Math.floor((parseInt(start.camelot)-1)/3)]);
+  const keyJourney=[currentKey];
+  const recentNums=new Set([parseInt(currentKey)]); // block same key number for 3 steps
 
   for(let i=1;i<len;i++){
-    const prev=result[result.length-1];
-    const targetBpm=flowBpm(i,len);
-    const minScore=minScoreAt(i,len);
-    const candidates=pool.filter(t=>!used.has(t.id));
-    if(!candidates.length) break;
+    const [minS, maxS]=moveRange(i, len);
 
-    // Prefer tracks in unvisited key zones if we've been in one zone too long
-    const sameZoneStreak=result.slice(-3).filter(t=>
-      Math.floor((parseInt(t.camelot)-1)/3)===Math.floor((parseInt(prev.camelot)-1)/3)
-    ).length;
-    const wantNewZone=sameZoneStreak>=2;
+    // Candidates: keys in score range with tracks available
+    let candidates=availKeys.filter(k=>{
+      const s=compatScore(currentKey,k);
+      return s>=minS && s<=maxS;
+    });
 
-    const scored=candidates.map(t=>{
-      const ks=compatScore(prev.camelot,t.camelot);
-      if(ks<minScore) return {t,score:-1}; // below threshold for this position
+    // Hard block: avoid key numbers used in last 2 steps
+    const lastNums=keyJourney.slice(-2).map(k=>parseInt(k));
+    const fresh=candidates.filter(k=>!lastNums.includes(parseInt(k)));
+    if(fresh.length) candidates=fresh;
 
-      const bpmScore=Math.max(0,10-Math.abs(t.bpm-targetBpm)*0.35);
-      const zone=Math.floor((parseInt(t.camelot)-1)/3);
-      const zoneBonus=wantNewZone&&!visitedZones.has(zone)?3:0;
-      // Slight bonus for score exactly at threshold (prefer interesting over ultra-safe)
-      const varietyBonus=(ks>=3&&ks<=5)?1:0;
-
-      return {t, score: ks*3 + bpmScore + zoneBonus + varietyBonus};
-    }).filter(x=>x.score>=0).sort((a,b)=>b.score-a.score);
-
-    if(!scored.length) {
-      // Fallback: relax constraints and just pick best BPM match
-      const fallback=candidates.map(t=>({
-        t, score:compatScore(prev.camelot,t.camelot)*2+Math.max(0,8-Math.abs(t.bpm-targetBpm)*0.3)
-      })).sort((a,b)=>b.score-a.score);
-      if(!fallback.length) break;
-      const pick=fallback[0].t;
-      result.push(pick); used.add(pick.id);
-      visitedZones.add(Math.floor((parseInt(pick.camelot)-1)/3));
-      continue;
+    // If nothing fits, widen the window
+    if(!candidates.length){
+      candidates=availKeys.filter(k=>!lastNums.includes(parseInt(k)));
     }
+    if(!candidates.length) candidates=availKeys;
 
-    // Pick from top candidates with slight randomness (not always the #1)
-    const topN=Math.min(Math.max(2, Math.floor(scored.length*0.3)), 4);
-    const pick=scored[Math.floor(Math.random()*topN)].t;
-    result.push(pick); used.add(pick.id);
-    visitedZones.add(Math.floor((parseInt(pick.camelot)-1)/3));
+    // Pick randomly from candidates (key journey has intentional randomness)
+    currentKey=candidates[Math.floor(Math.random()*candidates.length)];
+    keyJourney.push(currentKey);
+    recentNums.add(parseInt(currentKey));
   }
+
+  // ── PHASE 2: Fill tracks to match key journey ──────────────────────────────
+  const result=[];
+  const used=new Set();
+
+  keyJourney.forEach((targetKey, i)=>{
+    const targetBpm=flowBpm(i, len);
+    const avail=pool.filter(t=>!used.has(t.id));
+    if(!avail.length) return;
+
+    // Priority 1: exact key match
+    let candidates=avail.filter(t=>t.camelot===targetKey);
+
+    // Priority 2: high-compat key (score ≥7)
+    if(!candidates.length)
+      candidates=avail.filter(t=>compatScore(targetKey,t.camelot)>=7);
+
+    // Priority 3: any compatible (score ≥3)
+    if(!candidates.length)
+      candidates=avail.filter(t=>compatScore(targetKey,t.camelot)>=3);
+
+    // Fallback: anything unused
+    if(!candidates.length) candidates=avail;
+
+    // Among candidates, pick best BPM match (with small randomness in top 3)
+    candidates.sort((a,b)=>Math.abs(a.bpm-targetBpm)-Math.abs(b.bpm-targetBpm));
+    const topN=Math.min(3, candidates.length);
+    const pick=candidates[Math.floor(Math.random()*topN)];
+    result.push(pick);
+    used.add(pick.id);
+  });
 
   tracks.forEach(t=>t.inSet=false);
   setList=result;
