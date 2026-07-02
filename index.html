@@ -145,10 +145,10 @@ h1 { font-size:12px; letter-spacing:4px; color:#7b7bff; font-weight:normal; }
     <div id="filter-bar"></div>
 
     <div id="upload-zone">
-      <input type="file" id="file-input" accept=".txt,.tsv">
+      <input type="file" id="file-input" accept=".txt,.tsv,.xml">
       <h2>IMPORT LIBRARY</h2>
-      <p>Rekordbox 플레이리스트 txt 파일을<br>드래그하거나 클릭해서 올려주세요</p>
-      <div class="hint">Rekordbox → 파일 → 플레이리스트 내보내기 → txt</div>
+      <p>Rekordbox XML 또는 TXT 파일을<br>드래그하거나 클릭해서 올려주세요</p>
+      <div class="hint">XML: 파일 → rekordbox xml로 내보내기<br>TXT: 파일 → 플레이리스트 내보내기 → txt</div>
     </div>
 
     <div id="loading"><p>PARSING LIBRARY...</p></div>
@@ -339,7 +339,7 @@ let activeGenres=new Set();
 
 // PARSE REKORDBOX TXT (UTF-16, tab-separated)
 // cols: #, artwork, filetype, title, artist, album, genre, bpm, key, duration, rating, date
-function parseRekordbox(text) {
+function parseRekordboxTxt(text) {
   const lines = text.split(/\r?\n/).filter(l=>l.trim());
   const result = [];
   for(let i=1;i<lines.length;i++){
@@ -352,8 +352,41 @@ function parseRekordbox(text) {
     if(!title||!bpm) continue;
     const camelot=toCamelot(keyRaw);
     const cfg=getGenreCfg(genre);
-    result.push({title,artist,genre,bpm,keyRaw,camelot,dur,rating,color:cfg.color,genreLabel:cfg.label});
+    result.push({title,artist,genre,bpm,keyRaw,camelot,dur,rating,
+      color:cfg.color,genreLabel:cfg.label,filePath:null,trackId:null});
   }
+  return result;
+}
+
+// PARSE REKORDBOX XML
+// Extracts TrackID, file Location, and all metadata needed for M3U8 export
+function parseRekordboxXml(xmlText) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xmlText, 'application/xml');
+  if(doc.querySelector('parsererror')) throw new Error('XMLパース失敗 — Rekordbox XMLか確認してください');
+
+  const result = [];
+  doc.querySelectorAll('COLLECTION > TRACK').forEach(node => {
+    const title  = node.getAttribute('Name') || '';
+    const artist = node.getAttribute('Artist') || '';
+    const bpm    = parseFloat(node.getAttribute('AverageBpm') || node.getAttribute('BPM')) || 0;
+    const keyRaw = node.getAttribute('Tonality') || '';
+    const genre  = node.getAttribute('Genre') || '';
+    const totalTime = parseInt(node.getAttribute('TotalTime')) || 0;
+    const trackId = node.getAttribute('TrackID') || '';
+    // Location is file:///path/to/file.flac → decode to /path/to/file.flac
+    const locRaw = node.getAttribute('Location') || '';
+    const filePath = decodeURIComponent(locRaw.replace(/^file:\/\//,'').replace(/^\/\//,'/'));
+    const rating = node.getAttribute('Rating') || '';
+    // TotalTime is in seconds
+    const mm = Math.floor(totalTime/60), ss = totalTime%60;
+    const dur = `${mm}:${String(ss).padStart(2,'0')}`;
+    if(!title||!bpm) return;
+    const camelot = toCamelot(keyRaw);
+    const cfg = getGenreCfg(genre);
+    result.push({title,artist,genre,bpm,keyRaw,camelot,dur,rating,
+      color:cfg.color,genreLabel:cfg.label,filePath,trackId});
+  });
   return result;
 }
 
@@ -616,19 +649,22 @@ function buildStartKeySelect(){
   keys.forEach(k=>{const o=document.createElement('option');o.value=k;o.textContent=k;sel.appendChild(o);});
 }
 
-// FILE UPLOAD
+// FILE UPLOAD — auto-detect XML vs TXT
 function handleFile(file){
   document.getElementById('loading').style.display='block';
   document.getElementById('upload-zone').classList.add('hidden');
-  const reader=new FileReader();
-  reader.onload=e=>{
+  const isXml = file.name.toLowerCase().endsWith('.xml');
+
+  function onLoaded(text) {
     try{
-      library=parseRekordbox(e.target.result);
+      library = isXml ? parseRekordboxXml(text) : parseRekordboxTxt(text);
       if(!library.length) throw new Error('트랙을 찾지 못했습니다');
       buildPlanets(library);
       buildFilterBar();
       buildStartKeySelect();
-      document.getElementById('track-count').textContent=library.length+' TRACKS';
+      const hasPath = library.some(t=>t.filePath);
+      document.getElementById('track-count').textContent =
+        library.length+' TRACKS' + (hasPath ? '  ·  M3U8 ✓' : '  ·  TXT only');
       document.getElementById('left-panel').classList.remove('panels-hidden');
       document.getElementById('right-panel').classList.remove('panels-hidden');
       document.getElementById('loading').style.display='none';
@@ -637,8 +673,12 @@ function handleFile(file){
       document.getElementById('upload-zone').classList.remove('hidden');
       alert('파싱 실패: '+err.message);
     }
-  };
-  reader.readAsText(file,'UTF-16');
+  }
+
+  const reader=new FileReader();
+  reader.onload=e=>onLoaded(e.target.result);
+  if(isXml) reader.readAsText(file,'UTF-8');
+  else       reader.readAsText(file,'UTF-16');
 }
 
 const uz=document.getElementById('upload-zone');
@@ -664,19 +704,47 @@ document.getElementById('reset-btn').addEventListener('click',()=>{buildPlanets(
 document.getElementById('clear-btn').addEventListener('click',()=>{tracks.forEach(t=>t.inSet=false);setList=[];renderSetList();});
 document.getElementById('export-btn').addEventListener('click',()=>{
   if(!setList.length) return;
+  const hasPath = setList.some(t=>t.filePath);
+  if(hasPath) exportM3U8();
+  else exportText();
+});
+
+function exportM3U8(){
+  const lines=['#EXTM3U',''];
+  setList.forEach(t=>{
+    const [mm,ss]=(t.dur||'0:00').split(':').map(Number);
+    const secs=(mm||0)*60+(ss||0);
+    lines.push(`#EXTINF:${secs},${t.artist} - ${t.title}`);
+    lines.push(`#COMMENT key=${t.camelot} bpm=${t.bpm}`);
+    lines.push(t.filePath);
+    lines.push('');
+  });
+  const blob=new Blob([lines.join('\n')],{type:'audio/x-mpegurl;charset=utf-8'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='dj_set.m3u8';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function exportText(){
   let totalSecs=0;
   const lines=['DJ SET — MUSIC UNIVERSE','═'.repeat(42)];
   setList.forEach((t,i)=>{
-    const prev=setList[i-1],compat=prev?(keysCompat(prev.camelot,t.camelot)?'✓':'✗'):' ';
+    const prev=setList[i-1];
+    const rel=prev?compatLabel(prev.camelot,t.camelot):{label:''};
     lines.push(`${String(i+1).padStart(2,'0')}. ${t.title} — ${t.artist}`);
-    lines.push(`    ${t.bpm}bpm · ${t.camelot} (${t.keyRaw}) · ${t.dur} ${compat}`);
+    lines.push(`    ${t.bpm}bpm · ${t.camelot} (${t.keyRaw}) · ${t.dur}${rel.label?' · '+rel.label:''}`);
     const [mm,ss]=(t.dur||'0:00').split(':').map(Number);
     totalSecs+=(mm||0)*60+(ss||0);
   });
   lines.push('═'.repeat(42));
   lines.push(`TOTAL ${Math.floor(totalSecs/60)}min`);
-  alert(lines.join('\n'));
-});
+  // copy to clipboard
+  navigator.clipboard.writeText(lines.join('\n')).then(()=>{
+    alert(lines.join('\n')+'\n\n─\n클립보드에 복사됐어요!');
+  }).catch(()=>alert(lines.join('\n')));
+}
 
 // DRAW
 function drawTrack(t,sel){
