@@ -875,6 +875,11 @@ function exportText(){
   }).catch(()=>alert(lines.join('\n')));
 }
 
+// ─── SET JOURNEY VIEW ────────────────────────────────────────────────────────
+let journeyMode = false;
+let journeyT = 0;
+let journeyParticles = [];
+
 // DRAW
 function drawTrack(t,sel){
   if(!t.visible) return;
@@ -924,12 +929,36 @@ function draw(){
   requestAnimationFrame(draw);
 }
 
-resize();initStars();draw();
+resize();initStars();
 
-// ─── SET JOURNEY VIEW ────────────────────────────────────────────────────────
-let journeyMode = false;
-let journeyT = 0; // animation time
-let journeyParticles = []; // flowing particles along connections
+// Demo tracks preloaded so the universe isn't empty on first open
+const DEMO_TRACKS = [
+  {title:'Avalon',artist:'Amelie Lens',genre:'Techno',bpm:133,keyRaw:'Am'},
+  {title:'Lost In Music',artist:'Charlotte de Witte',genre:'Techno',bpm:140,keyRaw:'Dm'},
+  {title:'Cascade',artist:'Recondite',genre:'Melodic House & Techno',bpm:122,keyRaw:'Em'},
+  {title:'Fabric',artist:'Adam Beyer',genre:'Techno',bpm:136,keyRaw:'Fm'},
+  {title:'Shades Of Grey',artist:'Massano',genre:'Melodic House & Techno',bpm:126,keyRaw:'Gm'},
+  {title:'Follow You',artist:'Solomun',genre:'Minimal/Tech House',bpm:124,keyRaw:'Bm'},
+  {title:'Oceans',artist:'Anyma',genre:'Melodic House & Techno',bpm:120,keyRaw:'Cm'},
+  {title:'Protocol',artist:'Alignment',genre:'Techno',bpm:142,keyRaw:'F#m'},
+  {title:'Surface',artist:'Tale Of Us',genre:'Melodic House & Techno',bpm:118,keyRaw:'Abm'},
+  {title:'Nexus',artist:'Dense & Pika',genre:'Techno',bpm:138,keyRaw:'Bbm'},
+];
+library = DEMO_TRACKS.map(d => {
+  const camelot = toCamelot(d.keyRaw);
+  const cfg = getGenreCfg(d.genre);
+  return {title:d.title,artist:d.artist,genre:d.genre,bpm:d.bpm,keyRaw:d.keyRaw,
+    camelot,dur:'6:00',rating:'',color:cfg.color,genreLabel:cfg.label,filePath:null,trackId:null};
+});
+buildPlanets(library);
+buildFilterBar();
+buildStartKeySelect();
+document.getElementById('track-count').textContent = library.length + ' TRACKS  ·  DEMO';
+document.getElementById('upload-zone').classList.add('hidden');
+document.getElementById('left-panel').classList.remove('panels-hidden');
+document.getElementById('right-panel').classList.remove('panels-hidden');
+
+draw();
 
 function toggleJourney() {
   if (!setList.length) return;
