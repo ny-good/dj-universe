@@ -223,19 +223,72 @@ const KEY_TO_CAMELOT = {
   'Eb':'5B','D#':'5B','Bb':'6B','A#':'6B','F':'7B'
 };
 function toCamelot(k) { return KEY_TO_CAMELOT[k] || k; }
-function camelotNeighbors(c) {
-  const num = parseInt(c), letter = c.slice(-1);
-  const prev = num===1?12:num-1, next = num===12?1:num+1;
-  return [c, `${prev}${letter}`, `${next}${letter}`, `${num}${letter==='A'?'B':'A'}`];
+
+// ─── HARMONIC COMPATIBILITY ENGINE ───────────────────────────────────────────
+// Camelot wheel: numbers = circle of fifths, A=minor, B=major
+// Each step of 1 = perfect 5th interval
+//
+// Relationships used (ordered by smoothness):
+//  Score 10 — Unison: same key
+//  Score  9 — Adjacent (±1 same mode): dominant/subdominant, e.g. Am→Em or Am→Dm
+//  Score  8 — Parallel (same root, switch mode): Am↔A major
+//  Score  6 — Two steps (±2 same mode): e.g. Am→Bm — creates subtle energy shift
+//  Score  5 — Diagonal ±1 (switch mode + ±1): e.g. Am→G major — smooth modal shift
+//  Score  4 — Minor third (±3): e.g. Am→Cm — characteristic melodic techno lift
+//  Score  3 — Major third (±4): e.g. Am→C#m — bold emotional jump
+//  Score  2 — Perfect fifth away (±5): creates strong tension/resolution
+//  Score  1 — Tritone substitution (±6): maximum contrast, DJ "surprise" move
+//  Score  0 — Clash: avoid
+//
+// Note: melodic house/techno DJs regularly use ±3 and ±4 for emotional builds
+// These are NOT clashes — they're intentional harmonic moves
+
+function camelotDist(c1, c2) {
+  // Returns {diff: min circular distance 0-6, sameLetter: bool}
+  const n1=parseInt(c1), l1=c1.slice(-1);
+  const n2=parseInt(c2), l2=c2.slice(-1);
+  const cw=(n2-n1+12)%12, ccw=(n1-n2+12)%12;
+  return { diff: Math.min(cw,ccw), sameLetter: l1===l2, cw, ccw };
 }
-function keysCompat(k1,k2) { return camelotNeighbors(k1).includes(k2); }
-function compatScore(k1,k2) {
-  if(k1===k2) return 3;
-  const n=camelotNeighbors(k1);
-  if(n.slice(1,3).includes(k2)) return 2;
-  if(n[3]===k2) return 1;
+
+function compatScore(k1, k2) {
+  if(k1===k2) return 10;
+  const {diff, sameLetter} = camelotDist(k1, k2);
+  if(sameLetter) {
+    if(diff===1) return 9;  // perfect adjacent
+    if(diff===2) return 6;  // two steps — interesting
+    if(diff===3) return 4;  // minor third — melodic techno move
+    if(diff===4) return 3;  // major third — bold jump
+    if(diff===5) return 2;  // dominant 5th — tension
+    if(diff===6) return 1;  // tritone — dramatic
+  } else {
+    if(diff===0) return 8;  // parallel major/minor — mood flip
+    if(diff===1) return 5;  // diagonal smooth
+    if(diff===2) return 3;  // wider diagonal
+    if(diff===3) return 2;  // bold modal
+  }
   return 0;
 }
+
+// Human-readable relationship label for UI
+function compatLabel(k1, k2) {
+  if(k1===k2) return {label:'UNISON', color:'#44ff88'};
+  const {diff, sameLetter, cw} = camelotDist(k1, k2);
+  const dir = cw<=6 ? '↑' : '↓';
+  if(sameLetter && diff===1) return {label:`ADJACENT ${dir}`, color:'#44ee88'};
+  if(!sameLetter && diff===0) return {label:'PARALLEL', color:'#55ddaa'};
+  if(sameLetter && diff===2) return {label:`+2 SHIFT ${dir}`, color:'#88cc66'};
+  if(!sameLetter && diff===1) return {label:'DIAGONAL', color:'#99bb55'};
+  if(sameLetter && diff===3) return {label:`♭III LIFT ${dir}`, color:'#ccaa44'};
+  if(sameLetter && diff===4) return {label:`♭VI JUMP ${dir}`, color:'#cc8844'};
+  if(!sameLetter && diff===2) return {label:'MODAL SHIFT', color:'#bb8844'};
+  if(sameLetter && diff===5) return {label:'DOMINANT', color:'#cc6644'};
+  if(!sameLetter && diff===3) return {label:'MODAL JUMP', color:'#bb5544'};
+  if(sameLetter && diff===6) return {label:'TRITONE ⚡', color:'#ff4466'};
+  return {label:'CLASH ✗', color:'#ff3344'};
+}
+
+function keysCompat(k1,k2) { return compatScore(k1,k2) >= 3; }
 
 // GENRE COLORS
 const GENRE_MAP = {
@@ -330,6 +383,14 @@ function buildPlanets(lib){
 }
 
 // AUTO SET GENERATION
+// Strategy: alternate between "smooth" moves and "bold harmonic jumps"
+// to create a journey through the key space — avoids monotonous key clusters.
+//
+// Move types by flow:
+//   build → start quiet (±2,±3 bold), crescendo to tight (±1,±0)
+//   peak  → mix of smooth (±1) and lifts (±3) for sustained energy
+//   down  → start punchy (±1), loosen into drifts (±3,±4)
+//   wave  → alternating smooth/bold every 2-3 tracks
 function generateSet(){
   const len=parseInt(document.getElementById('set-length').value);
   const startKey=document.getElementById('start-key').value;
@@ -337,42 +398,89 @@ function generateSet(){
   const pool=tracks.filter(t=>t.visible);
   if(!pool.length) return;
 
+  // BPM target per position
   const flowBpm=(i,n)=>({
-    build: 112+(i/n)*20,
+    build: 112+(i/n)*22,
     peak:  122+Math.sin(i/n*Math.PI)*6,
-    down:  138-(i/n)*20,
+    down:  138-(i/n)*22,
     wave:  124+Math.sin(i/n*Math.PI*2)*8
   }[flow]);
 
+  // Minimum key score allowed at each position (varies by flow)
+  // Higher = stricter (safer), lower = bolder (more varied)
+  function minScoreAt(i, n) {
+    const t = i / n;
+    if(flow==='build') return t < 0.4 ? 2 : t < 0.75 ? 4 : 6;  // start loose → tighten
+    if(flow==='peak')  return (i%3===2) ? 3 : 5;                // every 3rd track: bold lift
+    if(flow==='down')  return t < 0.3 ? 6 : t < 0.7 ? 4 : 2;  // loosen as set winds down
+    if(flow==='wave')  return (i%2===0) ? 5 : 3;               // alternate smooth/bold
+    return 4;
+  }
+
+  // Pick start track
   let start=null;
   if(startKey!=='auto') start=pool.find(t=>t.camelot===startKey);
   if(!start){
-    const counts=pool.map(t=>({t,c:pool.filter(o=>keysCompat(t.camelot,o.camelot)).length}));
+    // Pick track with most harmonic connections in the pool
+    const counts=pool.map(t=>({t,c:pool.filter(o=>compatScore(t.camelot,o.camelot)>=4).length}));
     counts.sort((a,b)=>b.c-a.c);
     start=counts[0].t;
   }
 
   const result=[start], used=new Set([start.id]);
+  // Track which key "zones" (clusters of 3 numbers) we've visited
+  const visitedZones=new Set([Math.floor((parseInt(start.camelot)-1)/3)]);
+
   for(let i=1;i<len;i++){
     const prev=result[result.length-1];
-    const target=flowBpm(i,len);
+    const targetBpm=flowBpm(i,len);
+    const minScore=minScoreAt(i,len);
     const candidates=pool.filter(t=>!used.has(t.id));
     if(!candidates.length) break;
+
+    // Prefer tracks in unvisited key zones if we've been in one zone too long
+    const sameZoneStreak=result.slice(-3).filter(t=>
+      Math.floor((parseInt(t.camelot)-1)/3)===Math.floor((parseInt(prev.camelot)-1)/3)
+    ).length;
+    const wantNewZone=sameZoneStreak>=2;
+
     const scored=candidates.map(t=>{
       const ks=compatScore(prev.camelot,t.camelot);
-      const bpmScore=Math.max(0,10-Math.abs(t.bpm-target)*.4);
-      return {t, score:ks*4+bpmScore};
-    }).sort((a,b)=>b.score-a.score);
-    const top=scored.slice(0,Math.min(3,scored.length));
-    const pick=top[Math.floor(Math.random()*top.length)].t;
+      if(ks<minScore) return {t,score:-1}; // below threshold for this position
+
+      const bpmScore=Math.max(0,10-Math.abs(t.bpm-targetBpm)*0.35);
+      const zone=Math.floor((parseInt(t.camelot)-1)/3);
+      const zoneBonus=wantNewZone&&!visitedZones.has(zone)?3:0;
+      // Slight bonus for score exactly at threshold (prefer interesting over ultra-safe)
+      const varietyBonus=(ks>=3&&ks<=5)?1:0;
+
+      return {t, score: ks*3 + bpmScore + zoneBonus + varietyBonus};
+    }).filter(x=>x.score>=0).sort((a,b)=>b.score-a.score);
+
+    if(!scored.length) {
+      // Fallback: relax constraints and just pick best BPM match
+      const fallback=candidates.map(t=>({
+        t, score:compatScore(prev.camelot,t.camelot)*2+Math.max(0,8-Math.abs(t.bpm-targetBpm)*0.3)
+      })).sort((a,b)=>b.score-a.score);
+      if(!fallback.length) break;
+      const pick=fallback[0].t;
+      result.push(pick); used.add(pick.id);
+      visitedZones.add(Math.floor((parseInt(pick.camelot)-1)/3));
+      continue;
+    }
+
+    // Pick from top candidates with slight randomness (not always the #1)
+    const topN=Math.min(Math.max(2, Math.floor(scored.length*0.3)), 4);
+    const pick=scored[Math.floor(Math.random()*topN)].t;
     result.push(pick); used.add(pick.id);
+    visitedZones.add(Math.floor((parseInt(pick.camelot)-1)/3));
   }
 
   tracks.forEach(t=>t.inSet=false);
   setList=result;
   setList.forEach(t=>t.inSet=true);
   renderSetList();
-  if(setList[0]) { selectedTrack=setList[0]; updatePlayBar(setList[0]); }
+  if(setList[0]){ selectedTrack=setList[0]; updatePlayBar(setList[0]); }
 }
 
 // RENDER SET LIST
@@ -389,14 +497,16 @@ function renderSetList(){
     const prev=setList[i-1], compat=prev?keysCompat(prev.camelot,t.camelot):true;
     const [mm,ss]=(t.dur||'0:00').split(':').map(Number);
     totalSecs+=(mm||0)*60+(ss||0);
-    const bpmDiff=prev?((t.bpm-prev.bpm)>0?'+':'')+(t.bpm-prev.bpm).toFixed(0):'';
+    const bpmDiff=prev?((t.bpm-prev.bpm)>=0?'+':'')+(t.bpm-prev.bpm).toFixed(0):'';
+    const rel=prev?compatLabel(prev.camelot,t.camelot):null;
     const li=document.createElement('li');
     li.className='set-item';
     li.innerHTML=`<span class="idx">${String(i+1).padStart(2,'0')}</span>
       <span class="dot" style="background:${t.color}"></span>
       <div class="info">
         <div class="name">${t.title}</div>
-        <div class="meta ${compat?'ok':'bad'}">${t.camelot} · ${t.bpm}${bpmDiff?` <span style="opacity:.5">${bpmDiff}</span>`:''} · ${t.dur}</div>
+        <div class="meta" style="color:#2a2a44">${t.camelot} · ${t.bpm}${bpmDiff?` <span style="opacity:.5">${bpmDiff}</span>`:''} · ${t.dur}</div>
+        ${rel?`<div class="meta" style="color:${rel.color};font-size:7px;letter-spacing:.5px">${rel.label}</div>`:''}
       </div>
       <span class="remove" data-id="${t.id}">✕</span>`;
     ul.appendChild(li);
@@ -442,9 +552,10 @@ function showTooltip(t,x,y){
   const last=setList[setList.length-1];
   const tc=document.getElementById('tt-compat');
   if(last&&last.id!==t.id){
-    const ok=keysCompat(last.camelot,t.camelot);
-    tc.className='t-compat '+(ok?'ok':'bad');
-    tc.textContent=ok?`✓ ${last.camelot}→${t.camelot} 호환`:`✗ ${last.camelot}→${t.camelot} 충돌`;
+    const rel=compatLabel(last.camelot,t.camelot);
+    const score=compatScore(last.camelot,t.camelot);
+    tc.style.color=rel.color;
+    tc.textContent=`${last.camelot}→${t.camelot}  ${rel.label}  (${score}/10)`;
   } else tc.textContent='';
 }
 function hideTooltip(){tooltip.style.display='none';}
