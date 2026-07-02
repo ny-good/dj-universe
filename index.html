@@ -201,6 +201,7 @@ h1 { font-size:12px; letter-spacing:4px; color:#7b7bff; font-weight:normal; }
           <button class="btn danger" id="clear-btn">CLEAR</button>
           <button class="btn primary" id="export-btn">EXPORT ↗</button>
         </div>
+        <button class="btn" id="journey-btn" style="margin-top:6px;color:#8888ff;border-color:#2a2a7a">◈ SET JOURNEY VIEW</button>
       </div>
     </div>
 
@@ -910,6 +911,7 @@ function drawConnections(){
 }
 
 function draw(){
+  if(journeyMode){ drawJourney(); requestAnimationFrame(draw); return; }
   ctx.clearRect(0,0,W,H);
   stars.forEach(s=>{s.tw+=s.sp;const a=s.a*(.5+.5*Math.sin(s.tw));ctx.beginPath();ctx.arc(s.x*W,s.y*H,s.r,0,Math.PI*2);ctx.fillStyle=`rgba(185,185,255,${a})`;ctx.fill();});
   drawConnections();
@@ -923,6 +925,241 @@ function draw(){
 }
 
 resize();initStars();draw();
+
+// ─── SET JOURNEY VIEW ────────────────────────────────────────────────────────
+let journeyMode = false;
+let journeyT = 0; // animation time
+let journeyParticles = []; // flowing particles along connections
+
+function toggleJourney() {
+  if (!setList.length) return;
+  journeyMode = !journeyMode;
+  const btn = document.getElementById('journey-btn');
+  btn.textContent = journeyMode ? '✕ CLOSE JOURNEY' : '◈ SET JOURNEY VIEW';
+  btn.style.color = journeyMode ? '#ff6688' : '#8888ff';
+  btn.style.borderColor = journeyMode ? '#6a2a3a' : '#2a2a7a';
+  // Hide/show universe UI elements
+  document.getElementById('left-panel').style.opacity = journeyMode ? '0' : '1';
+  document.getElementById('left-panel').style.pointerEvents = journeyMode ? 'none' : 'all';
+  document.getElementById('filter-bar').style.opacity = journeyMode ? '0' : '1';
+  document.getElementById('hint-bar').style.display = journeyMode ? 'none' : 'block';
+  if (journeyMode) initJourneyParticles();
+}
+
+document.getElementById('journey-btn').addEventListener('click', toggleJourney);
+document.addEventListener('keydown', e => { if(e.key==='Escape' && journeyMode) toggleJourney(); });
+
+function initJourneyParticles() {
+  journeyParticles = [];
+  setList.forEach((t, i) => {
+    if (i >= setList.length - 1) return;
+    // 3-5 particles per connection
+    const count = 4;
+    for (let p = 0; p < count; p++) {
+      journeyParticles.push({
+        segIdx: i,
+        progress: p / count, // staggered start
+        speed: 0.003 + Math.random() * 0.002,
+        size: Math.random() * 2 + 1
+      });
+    }
+  });
+}
+
+function getJourneyNodePos(i) {
+  const n = setList.length;
+  if (n === 1) return { x: W/2, y: H/2 };
+
+  // Arrange in an arc across the screen
+  const padX = 120, padY = 160;
+  const usableW = W - padX * 2;
+  const usableH = H - padY * 2 - 80; // leave room for BPM curve at bottom
+
+  if (n <= 8) {
+    // Single row arc
+    const x = padX + (i / (n-1)) * usableW;
+    // Gentle sine arc
+    const arc = Math.sin((i / (n-1)) * Math.PI) * usableH * 0.15;
+    const y = padY + usableH * 0.35 - arc;
+    return { x, y };
+  } else {
+    // Two rows
+    const half = Math.ceil(n / 2);
+    const row = i < half ? 0 : 1;
+    const col = i < half ? i : i - half;
+    const cols = row === 0 ? half : n - half;
+    const x = padX + (col / (cols-1||1)) * usableW;
+    const y = padY + usableH * (row === 0 ? 0.2 : 0.55);
+    return { x, y };
+  }
+}
+
+function drawJourney() {
+  ctx.clearRect(0, 0, W, H);
+
+  // Soft dark bg
+  ctx.fillStyle = '#04050f';
+  ctx.fillRect(0, 0, W, H);
+  const bg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W,H)*0.6);
+  bg.addColorStop(0, 'rgba(14,6,44,0.8)'); bg.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+  // Stars (dimmed)
+  stars.forEach(s => {
+    s.tw += s.sp * 0.4;
+    const a = s.a * 0.3 * (0.5 + 0.5 * Math.sin(s.tw));
+    ctx.beginPath(); ctx.arc(s.x*W, s.y*H, s.r, 0, Math.PI*2);
+    ctx.fillStyle = `rgba(180,180,255,${a})`; ctx.fill();
+  });
+
+  if (!setList.length) return;
+  journeyT += 0.016;
+
+  const positions = setList.map((_, i) => getJourneyNodePos(i));
+  const bpms = setList.map(t => t.bpm);
+  const minBpm = Math.min(...bpms) - 4;
+  const maxBpm = Math.max(...bpms) + 4;
+
+  // ── BPM CURVE at bottom ─────────────────────────────────────────────────────
+  const curveY1 = H - 72, curveY2 = H - 30;
+  const curvePts = setList.map((t, i) => {
+    const n = setList.length;
+    const x = 120 + (i / (n-1||1)) * (W - 240);
+    const bpmNorm = (t.bpm - minBpm) / (maxBpm - minBpm || 1);
+    const y = curveY2 - bpmNorm * (curveY2 - curveY1 - 20);
+    return { x, y, t };
+  });
+
+  // BPM area fill
+  ctx.beginPath();
+  ctx.moveTo(curvePts[0].x, curveY2);
+  curvePts.forEach((p, i) => {
+    if (i === 0) ctx.lineTo(p.x, p.y);
+    else {
+      const prev = curvePts[i-1];
+      const cpx = (prev.x + p.x) / 2;
+      ctx.bezierCurveTo(cpx, prev.y, cpx, p.y, p.x, p.y);
+    }
+  });
+  ctx.lineTo(curvePts[curvePts.length-1].x, curveY2);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(60,60,160,0.08)'; ctx.fill();
+
+  // BPM curve line
+  ctx.beginPath();
+  curvePts.forEach((p, i) => {
+    if (i === 0) ctx.moveTo(p.x, p.y);
+    else {
+      const prev = curvePts[i-1];
+      const cpx = (prev.x + p.x) / 2;
+      ctx.bezierCurveTo(cpx, prev.y, cpx, p.y, p.x, p.y);
+    }
+  });
+  ctx.strokeStyle = 'rgba(80,80,200,0.35)'; ctx.lineWidth = 1; ctx.stroke();
+
+  // BPM dot + label per track
+  curvePts.forEach((p, i) => {
+    ctx.beginPath(); ctx.arc(p.x, p.y, 2.5, 0, Math.PI*2);
+    ctx.fillStyle = setList[i].color + 'cc'; ctx.fill();
+    ctx.font = '8px Courier New'; ctx.textAlign = 'center';
+    ctx.fillStyle = '#333355';
+    ctx.fillText(setList[i].bpm, p.x, curveY2 + 10);
+  });
+
+  // ── CONNECTION LINES ────────────────────────────────────────────────────────
+  for (let i = 0; i < setList.length - 1; i++) {
+    const a = positions[i], b = positions[i+1];
+    const rel = compatLabel(setList[i].camelot, setList[i+1].camelot);
+    const score = compatScore(setList[i].camelot, setList[i+1].camelot);
+
+    // Control point for curve
+    const cpx = (a.x + b.x) / 2;
+    const cpy = Math.min(a.y, b.y) - 30 - score * 3;
+
+    // Glow line
+    ctx.beginPath(); ctx.moveTo(a.x, a.y);
+    ctx.quadraticCurveTo(cpx, cpy, b.x, b.y);
+    ctx.strokeStyle = rel.color + '33'; ctx.lineWidth = 6; ctx.stroke();
+
+    // Main line
+    ctx.beginPath(); ctx.moveTo(a.x, a.y);
+    ctx.quadraticCurveTo(cpx, cpy, b.x, b.y);
+    ctx.strokeStyle = rel.color + '88'; ctx.lineWidth = 1.5;
+    ctx.setLineDash(score >= 7 ? [] : [4, 5]);
+    ctx.stroke(); ctx.setLineDash([]);
+
+    // Relationship label at midpoint
+    const t2 = 0.5;
+    const lx = (1-t2)*(1-t2)*a.x + 2*(1-t2)*t2*cpx + t2*t2*b.x;
+    const ly = (1-t2)*(1-t2)*a.y + 2*(1-t2)*t2*cpy + t2*t2*b.y - 12;
+    ctx.font = '7px Courier New'; ctx.textAlign = 'center';
+    ctx.fillStyle = rel.color + 'cc';
+    ctx.fillText(rel.label, lx, ly);
+  }
+
+  // ── FLOWING PARTICLES ───────────────────────────────────────────────────────
+  journeyParticles.forEach(p => {
+    p.progress += p.speed;
+    if (p.progress > 1) p.progress = 0;
+
+    const i = p.segIdx;
+    if (i >= setList.length - 1) return;
+    const a = positions[i], b = positions[i+1];
+    const cpx = (a.x + b.x) / 2;
+    const cpy = Math.min(a.y, b.y) - 30 - compatScore(setList[i].camelot, setList[i+1].camelot) * 3;
+    const t3 = p.progress;
+    const px2 = (1-t3)*(1-t3)*a.x + 2*(1-t3)*t3*cpx + t3*t3*b.x;
+    const py2 = (1-t3)*(1-t3)*a.y + 2*(1-t3)*t3*cpy + t3*t3*b.y;
+
+    const rel = compatLabel(setList[i].camelot, setList[i+1].camelot);
+    ctx.beginPath(); ctx.arc(px2, py2, p.size, 0, Math.PI*2);
+    ctx.fillStyle = rel.color + 'cc'; ctx.fill();
+  });
+
+  // ── TRACK NODES ─────────────────────────────────────────────────────────────
+  setList.forEach((t, i) => {
+    const { x, y } = positions[i];
+    const pulse = Math.sin(journeyT * 1.5 + i * 0.8) * 2;
+    const r = 22 + pulse * 0.4;
+
+    // Outer glow
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r + 18);
+    g.addColorStop(0, t.color + '66'); g.addColorStop(0.5, t.color + '18'); g.addColorStop(1, 'transparent');
+    ctx.beginPath(); ctx.arc(x, y, r + 18, 0, Math.PI*2); ctx.fillStyle = g; ctx.fill();
+
+    // Planet body
+    const bg2 = ctx.createRadialGradient(x - r*0.3, y - r*0.3, 1, x, y, r);
+    bg2.addColorStop(0, t.color + 'ff'); bg2.addColorStop(0.6, t.color + 'cc'); bg2.addColorStop(1, t.color + '44');
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fillStyle = bg2; ctx.fill();
+
+    // Index number inside
+    ctx.font = `bold ${r > 18 ? 11 : 9}px Courier New`; ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffffff99';
+    ctx.fillText(String(i+1).padStart(2,'0'), x, y + 4);
+
+    // Camelot key badge
+    const kx = x + r + 2, ky = y - r;
+    ctx.font = '8px Courier New'; ctx.textAlign = 'left';
+    ctx.fillStyle = t.color + 'ee';
+    ctx.fillText(t.camelot, kx, ky);
+
+    // Title above
+    ctx.font = '9px Courier New'; ctx.textAlign = 'center';
+    ctx.fillStyle = '#ccccee';
+    ctx.fillText(t.title.slice(0, 18), x, y - r - 20);
+
+    // Artist
+    ctx.font = '8px Courier New';
+    ctx.fillStyle = '#444466';
+    ctx.fillText(t.artist.slice(0, 18), x, y - r - 10);
+  });
+
+  // Title
+  ctx.font = '10px Courier New'; ctx.textAlign = 'center';
+  ctx.fillStyle = '#3a3a7a';
+  ctx.fillText('◈  SET JOURNEY  ·  ESC TO CLOSE', W/2, 28);
+}
+
 </script>
 </body>
 </html>
