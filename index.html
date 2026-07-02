@@ -145,10 +145,19 @@ h1 { font-size:12px; letter-spacing:4px; color:#7b7bff; font-weight:normal; }
     <div id="filter-bar"></div>
 
     <div id="upload-zone">
-      <input type="file" id="file-input" accept=".txt,.tsv,.xml">
+      <input type="file" id="file-input" accept=".txt,.tsv,.xml,.m3u,.m3u8">
       <h2>IMPORT LIBRARY</h2>
-      <p>Rekordbox XML 또는 TXT 파일을<br>드래그하거나 클릭해서 올려주세요</p>
-      <div class="hint">XML: 파일 → rekordbox xml로 내보내기<br>TXT: 파일 → 플레이리스트 내보내기 → txt</div>
+      <p>Rekordbox TXT 파일을 먼저 올려주세요<br><span style="color:#2a2a5a">BPM·키 정보로 우주를 구성합니다</span></p>
+      <div class="hint">Rekordbox → 플레이리스트 우클릭 → txt로 내보내기</div>
+    </div>
+
+    <div id="m3u-zone" style="display:none;position:absolute;bottom:56px;left:50%;transform:translateX(-50%);
+      background:rgba(6,6,20,0.94);border:1px dashed #1a1a5a;border-radius:8px;padding:10px 18px;
+      text-align:center;pointer-events:all;cursor:pointer;z-index:20;">
+      <input type="file" id="m3u-input" accept=".m3u,.m3u8" style="display:none">
+      <div style="font-size:9px;color:#4444aa;letter-spacing:2px;margin-bottom:3px">M3U8 LINK</div>
+      <div style="font-size:8px;color:#2a2a5a">M3U8 업로드 → Export 시 Rekordbox용 파일 생성</div>
+      <div id="m3u-status" style="font-size:8px;color:#336633;margin-top:3px"></div>
     </div>
 
     <div id="loading"><p>PARSING LIBRARY...</p></div>
@@ -336,6 +345,61 @@ let library=[], tracks=[], setList=[];
 let selectedTrack=null, dragging=null, dragOffX=0, dragOffY=0, moved=false;
 let hovered=null, playing=false, playProgress=0, playInterval=null;
 let activeGenres=new Set();
+
+// PARSE M3U8 — extract file paths keyed by "Artist - Title"
+function parseM3U8(text) {
+  const lines = text.split(/\r?\n/);
+  const map = {}; // normalized "title::artist" → filePath
+  let currentInfo = null;
+  for(const raw of lines){
+    const line = raw.trim();
+    if(line.startsWith('#EXTINF:')){
+      // #EXTINF:duration,Artist - Title
+      const comma = line.indexOf(',');
+      if(comma !== -1){
+        const label = line.slice(comma+1).trim(); // "Artist - Title"
+        currentInfo = label;
+      }
+    } else if(line && !line.startsWith('#')){
+      // This is the file path
+      if(currentInfo){
+        // Store by both "artist - title" and just "title" for fuzzy matching
+        map[normalize(currentInfo)] = line;
+        // also try just the title part (after " - ")
+        const dash = currentInfo.indexOf(' - ');
+        if(dash !== -1){
+          const title = currentInfo.slice(dash+3).trim();
+          map[normalize(title)] = line;
+        }
+      }
+      currentInfo = null;
+    }
+  }
+  return map;
+}
+
+function normalize(s){
+  return s.toLowerCase().replace(/[^a-z0-9]/g,'');
+}
+
+// Merge M3U8 file paths into existing library by matching title/artist
+function mergeM3U8Paths(m3uMap){
+  let matched = 0;
+  library.forEach(t=>{
+    // Try "artist - title"
+    const key1 = normalize(t.artist+' - '+t.title);
+    const key2 = normalize(t.title);
+    const key3 = normalize(t.title+' - '+t.artist);
+    const path = m3uMap[key1] || m3uMap[key2] || m3uMap[key3];
+    if(path){ t.filePath = path; matched++; }
+  });
+  // Also update planet objects
+  tracks.forEach(t=>{
+    const lib = library.find(l=>l.title===t.title&&l.artist===t.artist);
+    if(lib) t.filePath = lib.filePath;
+  });
+  return matched;
+}
 
 // PARSE REKORDBOX TXT (UTF-16, tab-separated)
 // cols: #, artwork, filetype, title, artist, album, genre, bpm, key, duration, rating, date
@@ -649,36 +713,48 @@ function buildStartKeySelect(){
   keys.forEach(k=>{const o=document.createElement('option');o.value=k;o.textContent=k;sel.appendChild(o);});
 }
 
-// FILE UPLOAD — auto-detect XML vs TXT
+// FILE UPLOAD — Step 1: TXT (metadata), Step 2: M3U8 (file paths)
 function handleFile(file){
   document.getElementById('loading').style.display='block';
   document.getElementById('upload-zone').classList.add('hidden');
-  const isXml = file.name.toLowerCase().endsWith('.xml');
-
-  function onLoaded(text) {
+  const reader=new FileReader();
+  reader.onload=e=>{
     try{
-      library = isXml ? parseRekordboxXml(text) : parseRekordboxTxt(text);
+      library = parseRekordboxTxt(e.target.result);
       if(!library.length) throw new Error('트랙을 찾지 못했습니다');
       buildPlanets(library);
       buildFilterBar();
       buildStartKeySelect();
-      const hasPath = library.some(t=>t.filePath);
-      document.getElementById('track-count').textContent =
-        library.length+' TRACKS' + (hasPath ? '  ·  M3U8 ✓' : '  ·  TXT only');
+      document.getElementById('track-count').textContent = library.length+' TRACKS';
       document.getElementById('left-panel').classList.remove('panels-hidden');
       document.getElementById('right-panel').classList.remove('panels-hidden');
+      document.getElementById('m3u-zone').style.display='block';
       document.getElementById('loading').style.display='none';
     }catch(err){
       document.getElementById('loading').style.display='none';
       document.getElementById('upload-zone').classList.remove('hidden');
       alert('파싱 실패: '+err.message);
     }
-  }
+  };
+  reader.readAsText(file,'UTF-16');
+}
 
+// Step 2: M3U8 upload — link file paths to existing library
+function handleM3U(file){
   const reader=new FileReader();
-  reader.onload=e=>onLoaded(e.target.result);
-  if(isXml) reader.readAsText(file,'UTF-8');
-  else       reader.readAsText(file,'UTF-16');
+  reader.onload=e=>{
+    try{
+      const m3uMap = parseM3U8(e.target.result);
+      const matched = mergeM3U8Paths(m3uMap);
+      if(!matched) throw new Error('매칭된 트랙이 없어요. TXT와 같은 플레이리스트 M3U8인지 확인해주세요.');
+      document.getElementById('m3u-status').textContent = `✓ ${matched}/${library.length} 트랙 매칭 완료 — Export 가능`;
+      document.getElementById('track-count').textContent = library.length+' TRACKS  ·  M3U8 ✓';
+    }catch(err){
+      document.getElementById('m3u-status').style.color='#aa4444';
+      document.getElementById('m3u-status').textContent = '✗ '+err.message;
+    }
+  };
+  reader.readAsText(file,'UTF-8');
 }
 
 const uz=document.getElementById('upload-zone');
@@ -689,12 +765,22 @@ uz.addEventListener('dragover',e=>{e.preventDefault();uz.classList.add('drag-ove
 uz.addEventListener('dragleave',()=>uz.classList.remove('drag-over'));
 uz.addEventListener('drop',e=>{e.preventDefault();uz.classList.remove('drag-over');if(e.dataTransfer.files[0])handleFile(e.dataTransfer.files[0]);});
 
+const mz=document.getElementById('m3u-zone');
+const mi=document.getElementById('m3u-input');
+mz.addEventListener('click',()=>mi.click());
+mi.addEventListener('change',e=>{if(e.target.files[0])handleM3U(e.target.files[0]);});
+mz.addEventListener('dragover',e=>{e.preventDefault();mz.style.borderColor='#4444aa';});
+mz.addEventListener('dragleave',()=>mz.style.borderColor='');
+mz.addEventListener('drop',e=>{e.preventDefault();mz.style.borderColor='';if(e.dataTransfer.files[0])handleM3U(e.dataTransfer.files[0]);});
+
 document.getElementById('new-upload-btn').addEventListener('click',()=>{
   library=[];tracks=[];setList=[];
   document.getElementById('filter-bar').innerHTML='';
   document.getElementById('left-panel').classList.add('panels-hidden');
   document.getElementById('right-panel').classList.add('panels-hidden');
   document.getElementById('upload-zone').classList.remove('hidden');
+  document.getElementById('m3u-zone').style.display='none';
+  document.getElementById('m3u-status').textContent='';
   document.getElementById('track-count').textContent='0 TRACKS';
   document.getElementById('bpm-val').textContent='—';
   renderSetList();
